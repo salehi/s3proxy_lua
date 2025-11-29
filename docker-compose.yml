@@ -1,0 +1,61 @@
+services:
+  s3-proxy-servera:
+    build: .
+    environment:
+      # Client credentials (what clients use to sign requests)
+      - CLIENT_ACCESS_KEY=${CLIENT_ACCESS_KEY}
+      - CLIENT_SECRET_KEY=${CLIENT_SECRET_KEY}
+      
+      # Server A origin credentials
+      - ORIGIN_ACCESS_KEY=${SERVERA_ACCESS_KEY}
+      - ORIGIN_SECRET_KEY=${SERVERA_SECRET_KEY}
+      - ORIGIN_HOST=${SERVERA_ENDPOINT}
+      - ORIGIN_PORT=${SERVERA_PORT:-443}
+      - ORIGIN_DOMAIN=${SERVERA_DOMAIN:-${SERVERA_ENDPOINT}}
+      - ORIGIN_SCHEME=${SERVERA_SCHEME:-https}
+      
+      # Proxy configuration
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  s3-proxy-serverb:
+    build: .
+    environment:
+      # Client credentials (same as serverA)
+      - CLIENT_ACCESS_KEY=${CLIENT_ACCESS_KEY}
+      - CLIENT_SECRET_KEY=${CLIENT_SECRET_KEY}
+      
+      # Server B origin credentials
+      - ORIGIN_ACCESS_KEY=${SERVERB_ACCESS_KEY}
+      - ORIGIN_SECRET_KEY=${SERVERB_SECRET_KEY}
+      - ORIGIN_HOST=${SERVERB_ENDPOINT}
+      - ORIGIN_PORT=${SERVERB_PORT:-443}
+      - ORIGIN_DOMAIN=${SERVERB_DOMAIN:-${SERVERB_ENDPOINT}}
+      - ORIGIN_SCHEME=${SERVERB_SCHEME:-https}
+      
+      # Proxy configuration
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      s3-proxy-servera:
+        condition: service_healthy
+      s3-proxy-serverb:
+        condition: service_healthy
+    restart: unless-stopped

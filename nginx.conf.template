@@ -1,0 +1,173 @@
+worker_processes auto;
+error_log /usr/local/openresty/nginx/logs/error.log info;
+pid /usr/local/openresty/nginx/logs/nginx.pid;
+
+# Export environment variables to be accessible in Lua
+env CLIENT_ACCESS_KEY;
+env CLIENT_SECRET_KEY;
+env ORIGIN_ACCESS_KEY;
+env ORIGIN_SECRET_KEY;
+env ORIGIN_DOMAIN;
+env ORIGIN_SCHEME;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    lua_package_path "/usr/local/openresty/nginx/lua/?.lua;;";
+    
+    # Required for lua-resty-http
+    resolver 8.8.8.8 ipv6=off;
+    
+    upstream origin {
+        server ${ORIGIN_HOST}:${ORIGIN_PORT};
+        keepalive 32;
+    }
+    
+    server {
+        listen ${PORT};
+        server_name _;
+        
+        # Health check endpoint
+        location = /healthz {
+            content_by_lua_block {
+                local http = require "resty.http"
+                local httpc = http.new()
+                httpc:set_timeout(5000)
+                
+                local origin_scheme = os.getenv("ORIGIN_SCHEME") or "https"
+                local origin_domain = os.getenv("ORIGIN_DOMAIN") or "${ORIGIN_HOST}"
+                
+                local res, err = httpc:request_uri(
+                    string.format("%s://%s/", origin_scheme, origin_domain),
+                    {
+                        method = "HEAD",
+                        ssl_verify = false  -- Disable SSL verification
+                    }
+                )
+                
+                if res and res.status >= 200 and res.status < 300 then
+                    ngx.status = 200
+                    ngx.say('{"status":"ok"}')
+                else
+                    ngx.status = 450
+                    ngx.say('{"status":"nok"}')
+                end
+            }
+        }
+        
+        # Main proxy handler
+        location / {
+            access_by_lua_block {
+                local s3_proxy = require "s3_proxy"
+                
+                -- Parse query parameters
+                local uri_args = ngx.req.get_uri_args()
+                
+                -- Detect signature version
+                local is_v4 = uri_args["X-Amz-Signature"] ~= nil
+                local is_v2 = uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil
+                
+                -- Skip verification for non-signed requests
+                if not is_v4 and not is_v2 then
+                    return
+                end
+                
+                -- Verify signature
+                local ok, err
+                if is_v4 then
+                    ok, err = s3_proxy.verify_signature_v4(
+                        ngx.var.request_uri,
+                        uri_args,
+                        ngx.req.get_headers(),
+                        ngx.req.get_method()
+                    )
+                elseif is_v2 then
+                    ok, err = s3_proxy.verify_signature_v2(
+                        ngx.var.request_uri,
+                        uri_args,
+                        ngx.req.get_headers()
+                    )
+                end
+                
+                if not ok then
+                    ngx.status = 403
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Invalid AWS signature: %s"}', err or "unknown"))
+                    ngx.exit(403)
+                end
+            }
+            
+            content_by_lua_block {
+                local s3_proxy = require "s3_proxy"
+                local http = require "resty.http"
+                
+                -- Parse query parameters
+                local uri_args = ngx.req.get_uri_args()
+                
+                -- Validate and re-sign URL
+                local new_query_string, err = s3_proxy.validate_and_resign_url(
+                    ngx.var.request_uri, 
+                    uri_args
+                )
+                
+                if err then
+                    ngx.status = 400
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Proxy error: %s"}', err))
+                    return ngx.exit(400)
+                end
+                
+                -- Build target URL
+                local origin_scheme = s3_proxy.ORIGIN_SCHEME
+                local origin_domain = s3_proxy.ORIGIN_DOMAIN
+                local target_url = string.format("%s://%s%s", 
+                    origin_scheme, origin_domain, ngx.var.uri)
+                
+                if new_query_string then
+                    target_url = target_url .. "?" .. new_query_string
+                end
+                
+                -- Forward request to origin
+                local httpc = http.new()
+                httpc:set_timeout(30000)
+                
+                -- Get request body if present
+                ngx.req.read_body()
+                local body = ngx.req.get_body_data()
+                
+                -- Forward headers (exclude host and content-length)
+                local headers = ngx.req.get_headers()
+                local forward_headers = {}
+                for k, v in pairs(headers) do
+                    local k_lower = string.lower(k)
+                    if k_lower ~= "host" and k_lower ~= "content-length" then
+                        forward_headers[k] = v
+                    end
+                end
+                
+                local res, err = httpc:request_uri(target_url, {
+                    method = ngx.req.get_method(),
+                    headers = forward_headers,
+                    body = body,
+                    ssl_verify = false  -- Disable SSL verification
+                })
+                
+                if not res then
+                    ngx.status = 502
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Upstream error: %s"}', err))
+                    return ngx.exit(502)
+                end
+                
+                -- Forward response
+                ngx.status = res.status
+                for k, v in pairs(res.headers) do
+                    ngx.header[k] = v
+                end
+                ngx.say(res.body)
+            }
+        }
+    }
+}
