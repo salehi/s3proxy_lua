@@ -69,6 +69,7 @@ local function calculate_signature_v2(secret_key, bucket, object_key, expiration
 end
 
 -- Calculate signature V4
+local function calculate_signature_v4(secret_key, datestamp, timestamp, credential_scope, canonical_request, region)
     region = region or ""
     
     -- Hash canonical request
