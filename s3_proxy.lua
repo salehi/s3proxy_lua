@@ -1,5 +1,6 @@
 local _M = {}
 
+local resty_sha1 = require "resty.sha1"
 local resty_sha256 = require "resty.sha256"
 local resty_hmac = require "resty.hmac"
 local str = require "resty.string"
@@ -42,8 +43,32 @@ local function get_param(params, key)
     return val
 end
 
+-- Detect signature version
+local function detect_signature_version(query_params)
+    local is_v4 = query_params["X-Amz-Signature"] ~= nil
+    local is_v2 = query_params["Signature"] ~= nil and (query_params["AWSAccessKeyId"] ~= nil or query_params["Expires"] ~= nil)
+    return is_v4, is_v2
+end
+
+-- Calculate signature V2
+local function calculate_signature_v2(secret_key, bucket, object_key, expiration)
+    local string_to_sign = string.format("GET\n\n\n%s\n/%s/%s", expiration, bucket, object_key)
+    
+    local hmac = require "resty.hmac"
+    local h = hmac:new(secret_key, hmac.ALGOS.SHA1)
+    if not h then
+        return nil
+    end
+    local ok = h:update(string_to_sign)
+    if not ok then
+        return nil
+    end
+    local signature = h:final()
+    
+    return ngx.encode_base64(signature)
+end
+
 -- Calculate signature V4
-local function calculate_signature_v4(secret_key, datestamp, timestamp, credential_scope, canonical_request, region)
     region = region or ""
     
     -- Hash canonical request
@@ -97,6 +122,40 @@ local function calculate_signature_v4(secret_key, datestamp, timestamp, credenti
     end
     
     return str.to_hex(signature)
+end
+
+-- Verify signature V2
+function _M.verify_signature_v2(request_uri, query_params, headers)
+    local access_key_id = get_param(query_params, "AWSAccessKeyId")
+    if access_key_id ~= _M.CLIENT_ACCESS_KEY then
+        return false, "Access key mismatch"
+    end
+    
+    local provided_signature = get_param(query_params, "Signature")
+    local expires = get_param(query_params, "Expires")
+    
+    if not provided_signature or not expires then
+        return false, "Missing signature or expires"
+    end
+    
+    -- Extract bucket and object from path
+    local path = string.match(request_uri, "^([^?]+)")
+    local path_parts = {}
+    for part in string.gmatch(path:gsub("^/", ""), "[^/]+") do
+        table.insert(path_parts, part)
+    end
+    
+    if #path_parts < 2 then
+        return false, "Invalid S3 path"
+    end
+    
+    local bucket = path_parts[1]
+    local object_key = table.concat(path_parts, "/", 2)
+    
+    -- Calculate expected signature
+    local expected_signature = calculate_signature_v2(_M.CLIENT_SECRET_KEY, bucket, object_key, expires)
+    
+    return provided_signature == expected_signature, nil
 end
 
 -- Verify signature V4
@@ -217,11 +276,23 @@ local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucke
     return url .. "?" .. table.concat(url_parts, "&")
 end
 
+-- Generate presigned URL V2
+local function generate_presigned_url_v2(endpoint, access_key, secret_key, bucket, object_key, expires_in)
+    local expiration = ngx.time() + expires_in
+    local signature_b64 = calculate_signature_v2(secret_key, bucket, object_key, expiration)
+    
+    local url = string.format("%s/%s/%s", endpoint, bucket, url_encode(object_key):gsub("%%2F", "/"))
+    local params = string.format("AWSAccessKeyId=%s&Expires=%d&Signature=%s",
+        url_encode(access_key), expiration, url_encode(signature_b64))
+    
+    return url .. "?" .. params
+end
+
 -- Validate and re-sign URL
 function _M.validate_and_resign_url(request_uri, query_params)
-    local is_v4 = query_params["X-Amz-Signature"] ~= nil
+    local is_v4, is_v2 = detect_signature_version(query_params)
     
-    if not is_v4 then
+    if not is_v4 and not is_v2 then
         return string.match(request_uri, "?(.+)$")
     end
     
@@ -240,19 +311,35 @@ function _M.validate_and_resign_url(request_uri, query_params)
     local object_key = table.concat(path_parts, "/", 2)
     
     local endpoint = string.format("%s://%s", _M.ORIGIN_SCHEME, _M.ORIGIN_DOMAIN)
-    local credential = get_param(query_params, "X-Amz-Credential")
-    if not credential then
-        return nil, "Missing credential"
-    end
+    local new_url
     
-    local access_key = string.match(credential, "^([^/]+)")
-    if access_key ~= _M.CLIENT_ACCESS_KEY then
-        return nil, "Access key mismatch"
+    if is_v4 then
+        local credential = get_param(query_params, "X-Amz-Credential")
+        if not credential then
+            return nil, "Missing credential"
+        end
+        
+        local access_key = string.match(credential, "^([^/]+)")
+        if access_key ~= _M.CLIENT_ACCESS_KEY then
+            return nil, "Access key mismatch"
+        end
+        
+        local expires_in = tonumber(get_param(query_params, "X-Amz-Expires")) or 3600
+        new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY, 
+            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, "")
+    elseif is_v2 then
+        local access_key_id = get_param(query_params, "AWSAccessKeyId")
+        if access_key_id ~= _M.CLIENT_ACCESS_KEY then
+            return nil, "Access key mismatch"
+        end
+        
+        local expires_timestamp = tonumber(get_param(query_params, "Expires"))
+        local current_timestamp = ngx.time()
+        local expires_in = math.max(expires_timestamp - current_timestamp, 60)
+        
+        new_url = generate_presigned_url_v2(endpoint, _M.ORIGIN_ACCESS_KEY, 
+            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in)
     end
-    
-    local expires_in = tonumber(get_param(query_params, "X-Amz-Expires")) or 3600
-    local new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY, 
-        _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, "")
     
     local query_string = string.match(new_url, "?(.+)$")
     return query_string, nil
