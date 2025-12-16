@@ -1,0 +1,218 @@
+worker_processes auto;
+error_log /usr/local/openresty/nginx/logs/error.log warn;
+pid /usr/local/openresty/nginx/logs/nginx.pid;
+
+# Increase file descriptor limits
+worker_rlimit_nofile 65535;
+
+# Export environment variables to be accessible in Lua
+env CLIENT_ACCESS_KEY;
+env CLIENT_SECRET_KEY;
+env ORIGIN_ACCESS_KEY;
+env ORIGIN_SECRET_KEY;
+env ORIGIN_DOMAIN;
+env ORIGIN_SCHEME;
+
+events {
+    # Use epoll for Linux
+    use epoll;
+    
+    # Increased for 10K concurrent users
+    worker_connections 4096;
+    
+    # Accept multiple connections at once
+    multi_accept on;
+}
+
+http {
+    include mime.types;
+    default_type application/octet-stream;
+    
+    lua_package_path "/usr/local/openresty/nginx/lua/?.lua;;";
+    
+    # DNS resolver with caching
+    resolver 8.8.8.8 8.8.4.4 ipv6=off valid=300s;
+    resolver_timeout 5s;
+    
+    # Logging
+    access_log /usr/local/openresty/nginx/logs/access.log combined buffer=32k flush=5s;
+    
+    # TCP optimizations
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    
+    # Keepalive
+    keepalive_timeout 65;
+    keepalive_requests 100;
+    
+    # Client settings
+    client_max_body_size 100M;
+    client_body_buffer_size 128k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 4 16k;
+    
+    # Timeouts
+    client_body_timeout 12;
+    client_header_timeout 12;
+    send_timeout 10;
+    
+    # Proxy buffer settings - CRITICAL for video/image streaming
+    proxy_buffering on;
+    proxy_buffer_size 8k;
+    proxy_buffers 32 8k;
+    proxy_busy_buffers_size 16k;
+    proxy_max_temp_file_size 2048m;
+    proxy_temp_file_write_size 8k;
+    
+    # Proxy connection settings
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 90s;
+    
+    # HTTP version for upstream
+    proxy_http_version 1.1;
+    
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss application/rss+xml;
+    gzip_disable "msie6";
+    
+    # File cache
+    open_file_cache max=10000 inactive=60s;
+    open_file_cache_valid 120s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+    
+    # Lua shared dictionaries for caching
+    lua_shared_dict signed_urls 10m;
+    
+    upstream origin {
+        server ${ORIGIN_HOST}:${ORIGIN_PORT};
+        keepalive 256;
+        keepalive_requests 1000;
+        keepalive_timeout 60s;
+    }
+    
+    server {
+        listen ${PORT} reuseport;
+        server_name _;
+        
+        # Health check endpoint
+        location = /healthz {
+            access_log off;
+            content_by_lua_block {
+                local http = require "resty.http"
+                local httpc = http.new()
+                httpc:set_timeout(5000)
+                
+                local origin_scheme = os.getenv("ORIGIN_SCHEME") or "https"
+                local origin_domain = os.getenv("ORIGIN_DOMAIN") or "${ORIGIN_HOST}"
+                
+                local res, err = httpc:request_uri(
+                    string.format("%s://%s/", origin_scheme, origin_domain),
+                    {
+                        method = "HEAD",
+                        ssl_verify = false
+                    }
+                )
+                
+                if res and res.status >= 200 and res.status < 300 then
+                    ngx.status = 200
+                    ngx.say('{"status":"ok"}')
+                else
+                    ngx.status = 450
+                    ngx.say('{"status":"nok"}')
+                end
+            }
+        }
+        
+        # Main proxy handler - using native nginx proxy instead of Lua HTTP
+        location / {
+            # Signature verification in access phase
+            access_by_lua_block {
+                local s3_proxy = require "s3_proxy"
+                
+                local uri_args = ngx.req.get_uri_args()
+                
+                local is_v4 = uri_args["X-Amz-Signature"] ~= nil
+                local is_v2 = uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil
+                
+                if not is_v4 and not is_v2 then
+                    return
+                end
+                
+                local ok, err
+                if is_v4 then
+                    ok, err = s3_proxy.verify_signature_v4(
+                        ngx.var.request_uri,
+                        uri_args,
+                        ngx.req.get_headers(),
+                        ngx.req.get_method()
+                    )
+                elseif is_v2 then
+                    ok, err = s3_proxy.verify_signature_v2(
+                        ngx.var.request_uri,
+                        uri_args,
+                        ngx.req.get_headers()
+                    )
+                end
+                
+                if not ok then
+                    ngx.status = 403
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Invalid AWS signature: %s"}', err or "unknown"))
+                    ngx.exit(403)
+                end
+            }
+            
+            # Re-sign URL and set for proxying
+            rewrite_by_lua_block {
+                local s3_proxy = require "s3_proxy"
+                local uri_args = ngx.req.get_uri_args()
+                
+                local new_query_string, err = s3_proxy.validate_and_resign_url(
+                    ngx.var.request_uri, 
+                    uri_args
+                )
+                
+                if err then
+                    ngx.status = 400
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Proxy error: %s"}', err))
+                    return ngx.exit(400)
+                end
+                
+                if new_query_string then
+                    ngx.var.args = new_query_string
+                end
+            }
+            
+            # Native nginx proxy - much faster than Lua HTTP
+            proxy_pass ${ORIGIN_SCHEME}://${ORIGIN_HOST};
+            
+            # Proxy headers
+            proxy_set_header Host ${ORIGIN_HOST};
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Connection reuse
+            proxy_set_header Connection "";
+            
+            # SSL settings for upstream
+            proxy_ssl_server_name on;
+            proxy_ssl_verify off;
+            
+            # Hide upstream headers
+            proxy_hide_header X-Amz-Request-Id;
+            proxy_hide_header X-Amz-Id-2;
+            
+            # Add cache headers for media
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+        }
+    }
+}
