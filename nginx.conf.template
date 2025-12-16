@@ -1,6 +1,9 @@
 worker_processes auto;
-error_log /usr/local/openresty/nginx/logs/error.log info;
+error_log /usr/local/openresty/nginx/logs/error.log warn;
 pid /usr/local/openresty/nginx/logs/nginx.pid;
+
+# Increase file descriptor limits
+worker_rlimit_nofile 65535;
 
 # Export environment variables to be accessible in Lua
 env CLIENT_ACCESS_KEY;
@@ -11,26 +14,96 @@ env ORIGIN_DOMAIN;
 env ORIGIN_SCHEME;
 
 events {
-    worker_connections 1024;
+    # Use epoll for Linux
+    use epoll;
+    
+    # Increased for 10K concurrent users
+    worker_connections 4096;
+    
+    # Accept multiple connections at once
+    multi_accept on;
 }
 
 http {
+    include mime.types;
+    default_type application/octet-stream;
+    
     lua_package_path "/usr/local/openresty/nginx/lua/?.lua;;";
     
-    # Required for lua-resty-http
-    resolver 8.8.8.8 ipv6=off;
+    # DNS resolver with caching
+    resolver 8.8.8.8 8.8.4.4 ipv6=off valid=300s;
+    resolver_timeout 5s;
+    
+    # Logging
+    access_log /usr/local/openresty/nginx/logs/access.log combined buffer=32k flush=5s;
+    
+    # TCP optimizations
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    
+    # Keepalive
+    keepalive_timeout 65;
+    keepalive_requests 100;
+    
+    # Client settings
+    client_max_body_size 100M;
+    client_body_buffer_size 128k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 4 16k;
+    
+    # Timeouts
+    client_body_timeout 12;
+    client_header_timeout 12;
+    send_timeout 10;
+    
+    # Proxy buffer settings - CRITICAL for video/image streaming
+    proxy_buffering on;
+    proxy_buffer_size 8k;
+    proxy_buffers 32 8k;
+    proxy_busy_buffers_size 16k;
+    proxy_max_temp_file_size 2048m;
+    proxy_temp_file_write_size 8k;
+    
+    # Proxy connection settings
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 90s;
+    
+    # HTTP version for upstream
+    proxy_http_version 1.1;
+    
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss application/rss+xml;
+    gzip_disable "msie6";
+    
+    # File cache
+    open_file_cache max=10000 inactive=60s;
+    open_file_cache_valid 120s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+    
+    # Lua shared dictionaries for caching
+    lua_shared_dict signed_urls 10m;
     
     upstream origin {
         server ${ORIGIN_HOST}:${ORIGIN_PORT};
-        keepalive 32;
+        keepalive 256;
+        keepalive_requests 1000;
+        keepalive_timeout 60s;
     }
     
     server {
-        listen ${PORT};
+        listen ${PORT} reuseport;
         server_name _;
         
         # Health check endpoint
         location = /healthz {
+            access_log off;
             content_by_lua_block {
                 local http = require "resty.http"
                 local httpc = http.new()
@@ -43,7 +116,7 @@ http {
                     string.format("%s://%s/", origin_scheme, origin_domain),
                     {
                         method = "HEAD",
-                        ssl_verify = false  -- Disable SSL verification
+                        ssl_verify = false
                     }
                 )
                 
@@ -57,24 +130,21 @@ http {
             }
         }
         
-        # Main proxy handler
+        # Main proxy handler - optimized Lua streaming proxy
         location / {
+            # Signature verification in access phase
             access_by_lua_block {
                 local s3_proxy = require "s3_proxy"
                 
-                -- Parse query parameters
                 local uri_args = ngx.req.get_uri_args()
                 
-                -- Detect signature version
                 local is_v4 = uri_args["X-Amz-Signature"] ~= nil
                 local is_v2 = uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil
                 
-                -- Skip verification for non-signed requests
                 if not is_v4 and not is_v2 then
                     return
                 end
                 
-                -- Verify signature
                 local ok, err
                 if is_v4 then
                     ok, err = s3_proxy.verify_signature_v4(
@@ -99,11 +169,11 @@ http {
                 end
             }
             
+            # Optimized streaming proxy with connection reuse
             content_by_lua_block {
                 local s3_proxy = require "s3_proxy"
                 local http = require "resty.http"
                 
-                -- Parse query parameters
                 local uri_args = ngx.req.get_uri_args()
                 
                 -- Validate and re-sign URL
@@ -129,44 +199,78 @@ http {
                     target_url = target_url .. "?" .. new_query_string
                 end
                 
-                -- Forward request to origin
+                -- Use connection from pool
                 local httpc = http.new()
-                httpc:set_timeout(30000)
+                httpc:set_timeouts(30000, 30000, 90000) -- connect, send, read
                 
-                -- Get request body if present
-                ngx.req.read_body()
-                local body = ngx.req.get_body_data()
-                
-                -- Forward headers (exclude host and content-length)
-                local headers = ngx.req.get_headers()
-                local forward_headers = {}
-                for k, v in pairs(headers) do
-                    local k_lower = string.lower(k)
-                    if k_lower ~= "host" and k_lower ~= "content-length" then
-                        forward_headers[k] = v
-                    end
-                end
-                
-                local res, err = httpc:request_uri(target_url, {
-                    method = ngx.req.get_method(),
-                    headers = forward_headers,
-                    body = body,
-                    ssl_verify = false  -- Disable SSL verification
+                -- Connect with keepalive
+                local ok, err = httpc:connect({
+                    scheme = origin_scheme,
+                    host = origin_domain,
+                    port = origin_scheme == "https" and 443 or 80,
+                    ssl_verify = false,
+                    pool = origin_domain,
+                    pool_size = 256
                 })
                 
-                if not res then
+                if not ok then
                     ngx.status = 502
                     ngx.header.content_type = "application/json"
-                    ngx.say(string.format('{"error":"Upstream error: %s"}', err))
+                    ngx.say(string.format('{"error":"Connection failed: %s"}', err))
                     return ngx.exit(502)
                 end
                 
-                -- Forward response
+                -- Send request
+                local res, err = httpc:request({
+                    method = ngx.req.get_method(),
+                    path = ngx.var.uri .. (new_query_string and ("?" .. new_query_string) or ""),
+                    headers = {
+                        ["Host"] = origin_domain,
+                        ["User-Agent"] = "nginx-s3-proxy/1.0"
+                    }
+                })
+                
+                if not res then
+                    httpc:close()
+                    ngx.status = 502
+                    ngx.header.content_type = "application/json"
+                    ngx.say(string.format('{"error":"Request failed: %s"}', err))
+                    return ngx.exit(502)
+                end
+                
+                -- Stream response headers
                 ngx.status = res.status
                 for k, v in pairs(res.headers) do
-                    ngx.header[k] = v
+                    if k ~= "Transfer-Encoding" and k ~= "Connection" then
+                        ngx.header[k] = v
+                    end
                 end
-                ngx.say(res.body)
+                
+                -- Add cache headers
+                ngx.header["Cache-Control"] = "public, max-age=31536000, immutable"
+                
+                -- Stream body in chunks
+                local reader = res.body_reader
+                if not reader then
+                    httpc:set_keepalive(60000, 256)
+                    return
+                end
+                
+                repeat
+                    local chunk, err = reader(65536) -- 64KB chunks
+                    if err then
+                        ngx.log(ngx.ERR, "Read error: ", err)
+                        break
+                    end
+                    
+                    if chunk then
+                        ngx.print(chunk)
+                        ngx.flush(true) -- flush immediately for streaming
+                    end
+                until not chunk
+                
+                -- Return connection to pool
+                httpc:set_keepalive(60000, 256)
             }
         }
     }
