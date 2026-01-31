@@ -81,17 +81,22 @@ curl http://localhost:8080/healthz
 CLIENT_ACCESS_KEY=your_client_key
 CLIENT_SECRET_KEY=your_client_secret
 
-# Server A (backup) - Origin credentials
-SERVERA_ACCESS_KEY=s3_server_a_key
-SERVERA_SECRET_KEY=s3_server_a_secret
-SERVERA_ENDPOINT=s3-region1.example.com
-SERVERA_PORT=443
+# Server A credentials
+SERVERB_ORIGIN_ACCESS_KEY=s3_servera_key
+SERVERB_ORIGIN_SECRET_KEY=s3_servera_secret
+SERVERB_ORIGIN_DOMAIN=s3_servera_domain
+SERVERB_ORIGIN_HOST=s3_servera_host
+SERVERB_ORIGIN_PORT="80"
+SERVERB_ORIGIN_SCHEME=http
 
-# Server B (primary) - Origin credentials
-SERVERB_ACCESS_KEY=s3_server_b_key
-SERVERB_SECRET_KEY=s3_server_b_secret
-SERVERB_ENDPOINT=s3-region2.example.com
-SERVERB_PORT=443
+# Server B credentials
+SERVERB_ORIGIN_ACCESS_KEY=s3_serverb_key
+SERVERB_ORIGIN_SECRET_KEY=s3_serverb_secret
+SERVERB_ORIGIN_DOMAIN=s3_serverb_domain
+SERVERB_ORIGIN_HOST=s3_serverb_host
+SERVERB_ORIGIN_PORT="80"
+SERVERB_ORIGIN_SCHEME=http
+
 ```
 
 ## Features
