@@ -135,32 +135,52 @@ http {
             # Signature verification in access phase
             access_by_lua_block {
                 local s3_proxy = require "s3_proxy"
-                
-                local uri_args = ngx.req.get_uri_args()
-                
-                local is_v4 = uri_args["X-Amz-Signature"] ~= nil
-                local is_v2 = uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil
-                
-                if not is_v4 and not is_v2 then
+
+                local uri_args   = ngx.req.get_uri_args()
+                local headers    = ngx.req.get_headers()
+
+                local is_v4      = uri_args["X-Amz-Signature"] ~= nil
+                local is_v2      = uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil
+                local is_auth_hdr = s3_proxy.detect_auth_header(headers)
+
+                if not is_v4 and not is_v2 and not is_auth_hdr then
                     return
                 end
-                
+
                 local ok, err
                 if is_v4 then
                     ok, err = s3_proxy.verify_signature_v4(
-                        ngx.var.request_uri,
-                        uri_args,
-                        ngx.req.get_headers(),
-                        ngx.req.get_method()
-                    )
+                        ngx.var.request_uri, uri_args, headers, ngx.req.get_method())
                 elseif is_v2 then
                     ok, err = s3_proxy.verify_signature_v2(
-                        ngx.var.request_uri,
-                        uri_args,
-                        ngx.req.get_headers()
-                    )
+                        ngx.var.request_uri, uri_args, headers)
+                else
+                    -- Authorization-header mode: read body for payload hash
+                    ngx.req.read_body()
+                    local body = ngx.req.get_body_data()
+                    if not body then
+                        local body_file = ngx.req.get_body_file()
+                        if body_file then
+                            local f = io.open(body_file, "rb")
+                            if f then
+                                body = f:read("*a")
+                                f:close()
+                            end
+                        end
+                    end
+
+                    local new_auth, new_ts, p_hash
+                    ok, new_auth, new_ts, p_hash, err = s3_proxy.verify_and_resign_auth_header(
+                        ngx.req.get_method(), ngx.var.uri, uri_args, headers, body)
+
+                    if ok then
+                        ngx.ctx.auth_header_mode = true
+                        ngx.ctx.new_auth_header  = new_auth
+                        ngx.ctx.new_amz_date     = new_ts
+                        ngx.ctx.payload_hash     = p_hash
+                    end
                 end
-                
+
                 if not ok then
                     ngx.status = 403
                     ngx.header.content_type = "application/json"
@@ -172,11 +192,16 @@ http {
             # Optimized streaming proxy with connection reuse
             content_by_lua_block {
                 local s3_proxy = require "s3_proxy"
-                local http = require "resty.http"
-                
-                local uri_args = ngx.req.get_uri_args()
-                
-                -- Read request body (needed for PUT/POST uploads)
+                local http     = require "resty.http"
+
+                local uri_args      = ngx.req.get_uri_args()
+                local origin_scheme = s3_proxy.ORIGIN_SCHEME
+                local origin_domain = s3_proxy.ORIGIN_DOMAIN
+                local method        = ngx.req.get_method()
+
+                -- Read request body (needed for PUT/POST uploads).
+                -- In auth-header mode the body was already read in access phase;
+                -- this call is idempotent and returns the buffered data.
                 ngx.req.read_body()
                 local req_body = ngx.req.get_body_data()
                 if not req_body then
@@ -190,64 +215,88 @@ http {
                     end
                 end
 
-                -- Validate and re-sign URL
-                local new_query_string, err = s3_proxy.validate_and_resign_url(
-                    ngx.var.request_uri,
-                    uri_args,
-                    ngx.req.get_method()
-                )
-                
-                if err then
-                    ngx.status = 400
-                    ngx.header.content_type = "application/json"
-                    ngx.say(string.format('{"error":"Proxy error: %s"}', err))
-                    return ngx.exit(400)
+                local upstream_path, req_headers
+
+                if ngx.ctx.auth_header_mode then
+                    -- Authorization-header mode: forward original query string unchanged,
+                    -- replace auth headers with the ORIGIN-signed values.
+                    local args = ngx.var.args
+                    upstream_path = ngx.var.uri
+                    if args and args ~= "" then
+                        upstream_path = upstream_path .. "?" .. args
+                    end
+
+                    -- Start from the original request headers (lowercased by OpenResty),
+                    -- then override the auth-sensitive ones.
+                    local orig_headers = ngx.req.get_headers()
+                    req_headers = {}
+                    for k, v in pairs(orig_headers) do
+                        req_headers[k] = v
+                    end
+                    req_headers["host"]                 = origin_domain
+                    req_headers["authorization"]        = ngx.ctx.new_auth_header
+                    req_headers["x-amz-date"]           = ngx.ctx.new_amz_date
+                    req_headers["x-amz-content-sha256"] = ngx.ctx.payload_hash
+                    req_headers["user-agent"]           = "s4l3h1/s3proxy_lua " .. (os.getenv("VERSION") or "dev")
+                    req_headers["content-length"]       = req_body and tostring(#req_body) or nil
+                    -- Remove hop-by-hop headers
+                    req_headers["connection"]           = nil
+                    req_headers["transfer-encoding"]    = nil
+                    req_headers["keep-alive"]           = nil
+                else
+                    -- Presigned URL mode: validate and re-sign the query string.
+                    local new_qs, err = s3_proxy.validate_and_resign_url(
+                        ngx.var.request_uri, uri_args, method)
+
+                    if err then
+                        ngx.status = 400
+                        ngx.header.content_type = "application/json"
+                        ngx.say(string.format('{"error":"Proxy error: %s"}', err))
+                        return ngx.exit(400)
+                    end
+
+                    upstream_path = ngx.var.uri
+                    if new_qs then
+                        upstream_path = upstream_path .. "?" .. new_qs
+                    end
+
+                    req_headers = {
+                        ["Host"]           = origin_domain,
+                        ["User-Agent"]     = "s4l3h1/s3proxy_lua " .. (os.getenv("VERSION") or "dev"),
+                        ["Content-Type"]   = ngx.var.content_type,
+                        ["Content-Length"] = req_body and tostring(#req_body) or nil,
+                    }
                 end
-                
-                -- Build target URL
-                local origin_scheme = s3_proxy.ORIGIN_SCHEME
-                local origin_domain = s3_proxy.ORIGIN_DOMAIN
-                local target_url = string.format("%s://%s%s", 
-                    origin_scheme, origin_domain, ngx.var.uri)
-                
-                if new_query_string then
-                    target_url = target_url .. "?" .. new_query_string
-                end
-                
+
                 -- Use connection from pool
                 local httpc = http.new()
                 httpc:set_timeouts(30000, 30000, 90000) -- connect, send, read
-                
+
                 -- Connect with keepalive
                 local ok, err = httpc:connect({
-                    scheme = origin_scheme,
-                    host = origin_domain,
-                    port = origin_scheme == "https" and 443 or 80,
+                    scheme     = origin_scheme,
+                    host       = origin_domain,
+                    port       = origin_scheme == "https" and 443 or 80,
                     ssl_verify = false,
-                    pool = origin_domain,
-                    pool_size = 256
+                    pool       = origin_domain,
+                    pool_size  = 256
                 })
-                
+
                 if not ok then
                     ngx.status = 502
                     ngx.header.content_type = "application/json"
                     ngx.say(string.format('{"error":"Connection failed: %s"}', err))
                     return ngx.exit(502)
                 end
-                
+
                 -- Send request
                 local res, err = httpc:request({
-                    method = ngx.req.get_method(),
-                    path = ngx.var.uri .. (new_query_string and ("?" .. new_query_string) or ""),
-                    headers = {
-                        ["Host"]           = origin_domain,
-                        ["User-Agent"]     = "s4l3h1/s3proxy_lua " .. (os.getenv("VERSION") or "dev"),
-                        ["Content-Type"]   = ngx.var.content_type,
-                        ["Content-Length"] = req_body and tostring(#req_body) or nil,
-                    },
-                    body = req_body,
+                    method  = method,
+                    path    = upstream_path,
+                    headers = req_headers,
+                    body    = req_body,
                 })
-                
+
                 if not res then
                     httpc:close()
                     ngx.status = 502
@@ -255,7 +304,7 @@ http {
                     ngx.say(string.format('{"error":"Request failed: %s"}', err))
                     return ngx.exit(502)
                 end
-                
+
                 -- Stream response headers
                 ngx.status = res.status
                 for k, v in pairs(res.headers) do
@@ -263,30 +312,30 @@ http {
                         ngx.header[k] = v
                     end
                 end
-                
+
                 -- Add cache headers
                 ngx.header["Cache-Control"] = "public, max-age=31536000, immutable"
-                
+
                 -- Stream body in chunks
                 local reader = res.body_reader
                 if not reader then
                     httpc:set_keepalive(60000, 256)
                     return
                 end
-                
+
                 repeat
                     local chunk, err = reader(65536) -- 64KB chunks
                     if err then
                         ngx.log(ngx.ERR, "Read error: ", err)
                         break
                     end
-                    
+
                     if chunk then
                         ngx.print(chunk)
                         ngx.flush(true) -- flush immediately for streaming
                     end
                 until not chunk
-                
+
                 -- Return connection to pool
                 httpc:set_keepalive(60000, 256)
             }

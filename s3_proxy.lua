@@ -26,6 +26,29 @@ local function url_encode(str)
     return str
 end
 
+-- AWS V4 URI encoding: percent-encode everything except unreserved chars (RFC 3986)
+-- Spaces become %20, not +
+-- Note: string.gsub returns (string, count); we discard the count so callers
+-- receive exactly one value (prevents table.insert mis-interpreting 2 returns).
+-- ngx.req.get_uri_args() returns boolean true for valueless params (e.g. ?location);
+-- those canonicalise to an empty value, so we treat true as "".
+local function aws_encode(s)
+    if not s or s == true then return "" end
+    local result, _ = string.gsub(tostring(s), "([^%w%-%.%_%~])",
+        function(c) return string.format("%%%02X", string.byte(c)) end)
+    return result
+end
+
+-- SHA256 hex digest
+local function sha256_hex(data)
+    local sha256 = resty_sha256:new()
+    sha256:update(data or "")
+    return str.to_hex(sha256:final())
+end
+
+-- Export sha256_hex for use in nginx.conf
+_M.sha256_hex = sha256_hex
+
 local function url_decode(str)
     if str then
         str = string.gsub(str, "+", " ")
@@ -351,6 +374,153 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
     
     local query_string = string.match(new_url, "?(.+)$")
     return query_string, nil
+end
+
+-- Detect Authorization-header mode (AWS Signature V4, header-based auth)
+function _M.detect_auth_header(headers)
+    local auth = headers["authorization"]
+    if auth and string.match(auth, "^AWS4%-HMAC%-SHA256") then
+        return true
+    end
+    return false
+end
+
+-- Verify the CLIENT signature on an Authorization-header request and produce a
+-- new Authorization header signed with ORIGIN credentials.
+--
+-- Returns: ok, new_auth_header, new_amz_date, payload_hash, err
+function _M.verify_and_resign_auth_header(method, path, query_params, headers, body)
+    local auth = headers["authorization"]
+    if not auth then
+        return false, nil, nil, nil, "Missing Authorization header"
+    end
+
+    -- Parse the three components from the Authorization header
+    local credential   = string.match(auth, "Credential=([^,%s]+)")
+    local signed_h_str = string.match(auth, "SignedHeaders=([^,%s]+)")
+    local provided_sig = string.match(auth, "Signature=([a-f0-9]+)")
+
+    if not credential or not signed_h_str or not provided_sig then
+        return false, nil, nil, nil, "Malformed Authorization header"
+    end
+
+    -- Credential format: ACCESS_KEY/DATE/REGION/s3/aws4_request
+    local cred_parts = {}
+    for part in string.gmatch(credential, "[^/]+") do
+        table.insert(cred_parts, part)
+    end
+    if #cred_parts < 5 then
+        return false, nil, nil, nil, "Malformed credential"
+    end
+    local access_key = cred_parts[1]
+    local date_stamp = cred_parts[2]
+    local region     = cred_parts[3]
+
+    if access_key ~= _M.CLIENT_ACCESS_KEY then
+        return false, nil, nil, nil, "Access key mismatch"
+    end
+
+    local amz_date = headers["x-amz-date"]
+    if not amz_date then
+        return false, nil, nil, nil, "Missing X-Amz-Date header"
+    end
+
+    -- Payload hash: use client-provided value or compute from body
+    local payload_hash = headers["x-amz-content-sha256"]
+    if not payload_hash then
+        payload_hash = sha256_hex(body or "")
+    end
+
+    -- Build signed headers list (already sorted and lowercased per spec)
+    local signed_h_list = {}
+    for h in string.gmatch(signed_h_str, "[^;]+") do
+        table.insert(signed_h_list, h)
+    end
+
+    -- Canonical URI: percent-encode each path segment
+    local canonical_uri
+    if path == "" or path == "/" then
+        canonical_uri = "/"
+    else
+        local segments = {}
+        for segment in string.gmatch(path, "[^/]+") do
+            table.insert(segments, aws_encode(segment))
+        end
+        canonical_uri = "/" .. table.concat(segments, "/")
+        if string.sub(path, -1) == "/" then
+            canonical_uri = canonical_uri .. "/"
+        end
+    end
+
+    -- Canonical query string: sort by encoded key
+    local qparts = {}
+    for key, value in pairs(query_params) do
+        local vals = type(value) == "table" and value or {value}
+        for _, v in ipairs(vals) do
+            table.insert(qparts, aws_encode(key) .. "=" .. aws_encode(v))
+        end
+    end
+    table.sort(qparts)
+    local canonical_qs = table.concat(qparts, "&")
+
+    -- Helper: build canonical headers string for a given (lowercase) headers table
+    local function build_canonical_headers(hdrs)
+        local s = ""
+        for _, h_name in ipairs(signed_h_list) do
+            local val = hdrs[h_name] or ""
+            val = string.match(tostring(val), "^%s*(.-)%s*$")
+            s = s .. h_name .. ":" .. val .. "\n"
+        end
+        return s
+    end
+
+    -- Verify CLIENT signature
+    local client_canon_headers = build_canonical_headers(headers)
+    local client_canon_req = string.format("%s\n%s\n%s\n%s\n%s\n%s",
+        method, canonical_uri, canonical_qs,
+        client_canon_headers, signed_h_str, payload_hash)
+
+    local credential_scope = string.format("%s/%s/s3/aws4_request", date_stamp, region)
+    local expected_sig = calculate_signature_v4(
+        _M.CLIENT_SECRET_KEY, date_stamp, amz_date,
+        credential_scope, client_canon_req, region)
+
+    if expected_sig ~= provided_sig then
+        return false, nil, nil, nil, "Signature mismatch"
+    end
+
+    -- Re-sign with ORIGIN credentials using a fresh timestamp
+    local now            = ngx.time()
+    local new_date       = os.date("!%Y%m%d", now)
+    local new_ts         = os.date("!%Y%m%dT%H%M%SZ", now)
+    local new_cred_scope = string.format("%s/%s/s3/aws4_request", new_date, region)
+
+    -- Build ORIGIN headers map: copy original (lowercase) then override host + date
+    local origin_hdrs = {}
+    for k, v in pairs(headers) do
+        origin_hdrs[k:lower()] = v
+    end
+    origin_hdrs["host"]      = _M.ORIGIN_DOMAIN
+    origin_hdrs["x-amz-date"] = new_ts
+
+    local origin_canon_headers = build_canonical_headers(origin_hdrs)
+    local origin_canon_req = string.format("%s\n%s\n%s\n%s\n%s\n%s",
+        method, canonical_uri, canonical_qs,
+        origin_canon_headers, signed_h_str, payload_hash)
+
+    local new_sig = calculate_signature_v4(
+        _M.ORIGIN_SECRET_KEY, new_date, new_ts,
+        new_cred_scope, origin_canon_req, region)
+
+    if not new_sig then
+        return false, nil, nil, nil, "Failed to compute origin signature"
+    end
+
+    local new_auth = string.format(
+        "AWS4-HMAC-SHA256 Credential=%s/%s,SignedHeaders=%s,Signature=%s",
+        _M.ORIGIN_ACCESS_KEY, new_cred_scope, signed_h_str, new_sig)
+
+    return true, new_auth, new_ts, payload_hash, nil
 end
 
 return _M
