@@ -13,6 +13,7 @@ _M.ORIGIN_ACCESS_KEY = os.getenv("ORIGIN_ACCESS_KEY") or "your_origin_access_key
 _M.ORIGIN_SECRET_KEY = os.getenv("ORIGIN_SECRET_KEY") or "your_origin_secret_key_here"
 _M.ORIGIN_DOMAIN = os.getenv("ORIGIN_DOMAIN") or "s3.example.com"
 _M.ORIGIN_SCHEME = os.getenv("ORIGIN_SCHEME") or "https"
+_M.ORIGIN_REGION = os.getenv("ORIGIN_REGION") or "us-east-1"
 
 -- URL encoding
 local function url_encode(str)
@@ -189,9 +190,13 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
     local path = string.match(request_uri, "^([^?]+)")
     local host = headers["host"] or headers["Host"]
     
-    -- Calculate credential scope (empty region for S3-compatible services)
+    -- Extract region from credential: ACCESS_KEY/DATE/REGION/s3/aws4_request
     local date_stamp = string.sub(amz_date, 1, 8)
-    local region = ""
+    local cred_parts = {}
+    for part in string.gmatch(credential, "[^/]+") do
+        table.insert(cred_parts, part)
+    end
+    local region = cred_parts[3] or "us-east-1"
     local credential_scope = string.format("%s/%s/s3/aws4_request", date_stamp, region)
     
     -- Build canonical query string (exclude signature)
@@ -326,8 +331,8 @@ function _M.validate_and_resign_url(request_uri, query_params)
         end
         
         local expires_in = tonumber(get_param(query_params, "X-Amz-Expires")) or 3600
-        new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY, 
-            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, "")
+        new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY,
+            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, _M.ORIGIN_REGION)
     elseif is_v2 then
         local access_key_id = get_param(query_params, "AWSAccessKeyId")
         if access_key_id ~= _M.CLIENT_ACCESS_KEY then
