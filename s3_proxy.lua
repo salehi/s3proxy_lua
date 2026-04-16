@@ -177,9 +177,14 @@ function _M.verify_signature_v2(request_uri, query_params, headers)
     local bucket = path_parts[1]
     local object_key = table.concat(path_parts, "/", 2)
     
+    -- Reject expired URLs
+    if tonumber(expires) < ngx.time() then
+        return false, "Request expired"
+    end
+
     -- Calculate expected signature
     local expected_signature = calculate_signature_v2(_M.CLIENT_SECRET_KEY, bucket, object_key, expires)
-    
+
     return provided_signature == expected_signature, nil
 end
 
@@ -228,8 +233,8 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
         if key ~= "X-Amz-Signature" then
             local vals = type(value) == "table" and value or {value}
             for _, v in ipairs(vals) do
-                table.insert(canonical_parts, 
-                    string.format("%s=%s", url_encode(key), url_encode(v)))
+                table.insert(canonical_parts,
+                    string.format("%s=%s", aws_encode(key), aws_encode(v)))
             end
         end
     end
@@ -243,11 +248,25 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
         method or "GET", path, canonical_querystring, 
         canonical_headers, signed_headers, payload_hash)
     
+    -- Reject expired presigned URLs (X-Amz-Expires is seconds since X-Amz-Date)
+    local amz_expires = tonumber(get_param(query_params, "X-Amz-Expires"))
+    if amz_expires then
+        -- Parse X-Amz-Date: YYYYMMDDTHHMMSSz
+        local yr, mo, dy, hr, mn, sc = string.match(amz_date, "^(%d%d%d%d)(%d%d)(%d%d)T(%d%d)(%d%d)(%d%d)Z$")
+        if yr then
+            local signed_at = os.time({year=tonumber(yr), month=tonumber(mo), day=tonumber(dy),
+                                       hour=tonumber(hr), min=tonumber(mn), sec=tonumber(sc)})
+            if ngx.time() > signed_at + amz_expires then
+                return false, "Request expired"
+            end
+        end
+    end
+
     -- Calculate signature
     local expected_signature = calculate_signature_v4(
-        _M.CLIENT_SECRET_KEY, date_stamp, amz_date, 
+        _M.CLIENT_SECRET_KEY, date_stamp, amz_date,
         credential_scope, canonical_request, region)
-    
+
     return provided_signature == expected_signature, nil
 end
 
@@ -276,28 +295,28 @@ local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucke
     
     local canonical_parts = {}
     for key, value in pairs(params) do
-        table.insert(canonical_parts, 
-            string.format("%s=%s", url_encode(key), url_encode(value)))
+        table.insert(canonical_parts,
+            string.format("%s=%s", aws_encode(key), aws_encode(value)))
     end
     table.sort(canonical_parts)
     local canonical_querystring = table.concat(canonical_parts, "&")
-    
+
     local canonical_headers = string.format("host:%s\n", host)
     local signed_headers = "host"
     local payload_hash = "UNSIGNED-PAYLOAD"
-    
+
     local canonical_request = string.format("%s\n%s\n%s\n%s\n%s\n%s",
         method,
-        canonical_uri, canonical_querystring, canonical_headers, 
+        canonical_uri, canonical_querystring, canonical_headers,
         signed_headers, payload_hash)
-    
-    local signature = calculate_signature_v4(secret_key, datestamp, timestamp, 
+
+    local signature = calculate_signature_v4(secret_key, datestamp, timestamp,
         credential_scope, canonical_request, region)
-    
+
     params["X-Amz-Signature"] = signature
     local url_parts = {}
     for key, value in pairs(params) do
-        table.insert(url_parts, string.format("%s=%s", url_encode(key), url_encode(value)))
+        table.insert(url_parts, string.format("%s=%s", aws_encode(key), aws_encode(value)))
     end
     table.sort(url_parts)
     
@@ -324,7 +343,7 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
     local is_v4, is_v2 = detect_signature_version(query_params)
     
     if not is_v4 and not is_v2 then
-        return string.match(request_uri, "?(.+)$")
+        return nil, "unsigned request"
     end
     
     -- Extract bucket and object from path
