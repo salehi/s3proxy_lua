@@ -29,11 +29,10 @@ http {
     default_type application/octet-stream;
     
     lua_package_path "/usr/local/openresty/nginx/lua/?.lua;;";
-    
-    # DNS resolver with caching
-    resolver 8.8.8.8 8.8.4.4 ipv6=off valid=300s;
-    resolver_timeout 5s;
-    
+
+    # DNS resolver — populated from /etc/resolv.conf at container start
+    resolver ${RESOLVER} valid=30s ipv6=off;
+
     # Logging
     access_log /usr/local/openresty/nginx/logs/access.log combined buffer=32k flush=5s;
     
