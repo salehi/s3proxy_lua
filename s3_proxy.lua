@@ -80,6 +80,14 @@ local function get_param(params, key)
     return val
 end
 
+-- HMAC-SHA256: module-level so no closure is allocated per request
+local function hmac_sha256(key, data)
+    local h = resty_hmac:new(key, resty_hmac.ALGOS.SHA256)
+    if not h then return nil end
+    if not h:update(data) then return nil end
+    return h:final()
+end
+
 -- Detect signature version
 local function detect_signature_version(query_params)
     local is_v4 = query_params["X-Amz-Signature"] ~= nil
@@ -91,8 +99,7 @@ end
 local function calculate_signature_v2(secret_key, bucket, object_key, expiration)
     local string_to_sign = string.format("GET\n\n\n%s\n/%s/%s", expiration, bucket, object_key)
     
-    local hmac = require "resty.hmac"
-    local h = hmac:new(secret_key, hmac.ALGOS.SHA1)
+    local h = resty_hmac:new(secret_key, resty_hmac.ALGOS.SHA1)
     if not h then
         return nil
     end
@@ -120,19 +127,6 @@ local function calculate_signature_v4(secret_key, datestamp, timestamp, credenti
         algorithm, timestamp, credential_scope, canonical_hash)
     
     -- Signing key derivation
-    local function hmac_sha256(key, data)
-        local hmac = require "resty.hmac"
-        local h = hmac:new(key, hmac.ALGOS.SHA256)
-        if not h then
-            return nil
-        end
-        local ok = h:update(data)
-        if not ok then
-            return nil
-        end
-        return h:final()
-    end
-    
     local kDate = hmac_sha256("AWS4" .. secret_key, datestamp)
     if not kDate then
         return nil
@@ -162,6 +156,19 @@ local function calculate_signature_v4(secret_key, datestamp, timestamp, credenti
     return str.to_hex(signature)
 end
 
+-- Parse bucket and object key from a request URI (/bucket/key?...)
+local function parse_s3_path(uri)
+    local path = string.match(uri, "^([^?]+)")
+    local parts = {}
+    for part in string.gmatch(path:gsub("^/", ""), "[^/]+") do
+        table.insert(parts, part)
+    end
+    if #parts < 2 then
+        return nil, nil, "Invalid S3 path"
+    end
+    return parts[1], table.concat(parts, "/", 2), nil
+end
+
 -- Verify signature V2
 function _M.verify_signature_v2(request_uri, query_params, headers)
     local access_key_id = get_param(query_params, "AWSAccessKeyId")
@@ -177,19 +184,11 @@ function _M.verify_signature_v2(request_uri, query_params, headers)
     end
     
     -- Extract bucket and object from path
-    local path = string.match(request_uri, "^([^?]+)")
-    local path_parts = {}
-    for part in string.gmatch(path:gsub("^/", ""), "[^/]+") do
-        table.insert(path_parts, part)
+    local bucket, object_key, path_err = parse_s3_path(request_uri)
+    if path_err then
+        return false, path_err
     end
-    
-    if #path_parts < 2 then
-        return false, "Invalid S3 path"
-    end
-    
-    local bucket = path_parts[1]
-    local object_key = table.concat(path_parts, "/", 2)
-    
+
     -- Reject expired URLs
     if tonumber(expires) < ngx.time() then
         return false, "Request expired"
@@ -358,18 +357,10 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
     end
     
     -- Extract bucket and object from path
-    local path = string.match(request_uri, "^([^?]+)")
-    local path_parts = {}
-    for part in string.gmatch(path:gsub("^/", ""), "[^/]+") do
-        table.insert(path_parts, part)
+    local bucket, object_key, path_err = parse_s3_path(request_uri)
+    if path_err then
+        return nil, path_err
     end
-    
-    if #path_parts < 2 then
-        return nil, "Invalid S3 path"
-    end
-    
-    local bucket = path_parts[1]
-    local object_key = table.concat(path_parts, "/", 2)
     
     local endpoint = string.format("%s://%s", _M.ORIGIN_SCHEME, _M.ORIGIN_DOMAIN)
     local new_url
