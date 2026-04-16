@@ -6,14 +6,16 @@ local resty_hmac = require "resty.hmac"
 local str = require "resty.string"
 local http = require "resty.http"
 
--- Configuration (set via environment variables)
-_M.CLIENT_ACCESS_KEY = os.getenv("CLIENT_ACCESS_KEY") or "your_client_access_key_here"
-_M.CLIENT_SECRET_KEY = os.getenv("CLIENT_SECRET_KEY") or "your_client_secret_key_here"
-_M.ORIGIN_ACCESS_KEY = os.getenv("ORIGIN_ACCESS_KEY") or "your_origin_access_key_here"
-_M.ORIGIN_SECRET_KEY = os.getenv("ORIGIN_SECRET_KEY") or "your_origin_secret_key_here"
+-- Secrets: module-level locals, not accessible via the module table
+local CLIENT_ACCESS_KEY = os.getenv("CLIENT_ACCESS_KEY") or "your_client_access_key_here"
+local CLIENT_SECRET_KEY = os.getenv("CLIENT_SECRET_KEY") or "your_client_secret_key_here"
+local ORIGIN_ACCESS_KEY = os.getenv("ORIGIN_ACCESS_KEY") or "your_origin_access_key_here"
+local ORIGIN_SECRET_KEY = os.getenv("ORIGIN_SECRET_KEY") or "your_origin_secret_key_here"
+local ORIGIN_REGION     = os.getenv("ORIGIN_REGION")     or "us-east-1"
+
+-- Non-secret config: exposed for callers (e.g. nginx.conf reads these)
 _M.ORIGIN_DOMAIN = os.getenv("ORIGIN_DOMAIN") or "s3.example.com"
 _M.ORIGIN_SCHEME = os.getenv("ORIGIN_SCHEME") or "https"
-_M.ORIGIN_REGION = os.getenv("ORIGIN_REGION") or "us-east-1"
 
 -- URL encoding
 local function url_encode(str)
@@ -152,7 +154,7 @@ end
 -- Verify signature V2
 function _M.verify_signature_v2(request_uri, query_params, headers)
     local access_key_id = get_param(query_params, "AWSAccessKeyId")
-    if access_key_id ~= _M.CLIENT_ACCESS_KEY then
+    if access_key_id ~= CLIENT_ACCESS_KEY then
         return false, "Access key mismatch"
     end
     
@@ -183,7 +185,7 @@ function _M.verify_signature_v2(request_uri, query_params, headers)
     end
 
     -- Calculate expected signature
-    local expected_signature = calculate_signature_v2(_M.CLIENT_SECRET_KEY, bucket, object_key, expires)
+    local expected_signature = calculate_signature_v2(CLIENT_SECRET_KEY, bucket, object_key, expires)
 
     return provided_signature == expected_signature, nil
 end
@@ -197,7 +199,7 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
     
     -- Extract access key from credential
     local access_key = string.match(credential, "^([^/]+)")
-    if access_key ~= _M.CLIENT_ACCESS_KEY then
+    if access_key ~= CLIENT_ACCESS_KEY then
         return false, "Access key mismatch"
     end
     
@@ -264,7 +266,7 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
 
     -- Calculate signature
     local expected_signature = calculate_signature_v4(
-        _M.CLIENT_SECRET_KEY, date_stamp, amz_date,
+        CLIENT_SECRET_KEY, date_stamp, amz_date,
         credential_scope, canonical_request, region)
 
     return provided_signature == expected_signature, nil
@@ -370,16 +372,16 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
         end
         
         local access_key = string.match(credential, "^([^/]+)")
-        if access_key ~= _M.CLIENT_ACCESS_KEY then
+        if access_key ~= CLIENT_ACCESS_KEY then
             return nil, "Access key mismatch"
         end
         
         local expires_in = tonumber(get_param(query_params, "X-Amz-Expires")) or 3600
-        new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY,
-            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, _M.ORIGIN_REGION, method)
+        new_url = generate_presigned_url_v4(endpoint, ORIGIN_ACCESS_KEY,
+            ORIGIN_SECRET_KEY, bucket, object_key, expires_in, ORIGIN_REGION, method)
     elseif is_v2 then
         local access_key_id = get_param(query_params, "AWSAccessKeyId")
-        if access_key_id ~= _M.CLIENT_ACCESS_KEY then
+        if access_key_id ~= CLIENT_ACCESS_KEY then
             return nil, "Access key mismatch"
         end
         
@@ -387,8 +389,8 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
         local current_timestamp = ngx.time()
         local expires_in = math.max(expires_timestamp - current_timestamp, 60)
         
-        new_url = generate_presigned_url_v2(endpoint, _M.ORIGIN_ACCESS_KEY, 
-            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in)
+        new_url = generate_presigned_url_v2(endpoint, ORIGIN_ACCESS_KEY, 
+            ORIGIN_SECRET_KEY, bucket, object_key, expires_in)
     end
     
     local query_string = string.match(new_url, "?(.+)$")
@@ -435,7 +437,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
     local date_stamp = cred_parts[2]
     local region     = cred_parts[3]
 
-    if access_key ~= _M.CLIENT_ACCESS_KEY then
+    if access_key ~= CLIENT_ACCESS_KEY then
         return false, nil, nil, nil, "Access key mismatch"
     end
 
@@ -501,7 +503,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
 
     local credential_scope = string.format("%s/%s/s3/aws4_request", date_stamp, region)
     local expected_sig = calculate_signature_v4(
-        _M.CLIENT_SECRET_KEY, date_stamp, amz_date,
+        CLIENT_SECRET_KEY, date_stamp, amz_date,
         credential_scope, client_canon_req, region)
 
     if expected_sig ~= provided_sig then
@@ -528,7 +530,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
         origin_canon_headers, signed_h_str, payload_hash)
 
     local new_sig = calculate_signature_v4(
-        _M.ORIGIN_SECRET_KEY, new_date, new_ts,
+        ORIGIN_SECRET_KEY, new_date, new_ts,
         new_cred_scope, origin_canon_req, region)
 
     if not new_sig then
@@ -537,7 +539,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
 
     local new_auth = string.format(
         "AWS4-HMAC-SHA256 Credential=%s/%s,SignedHeaders=%s,Signature=%s",
-        _M.ORIGIN_ACCESS_KEY, new_cred_scope, signed_h_str, new_sig)
+        ORIGIN_ACCESS_KEY, new_cred_scope, signed_h_str, new_sig)
 
     return true, new_auth, new_ts, payload_hash, nil
 end
