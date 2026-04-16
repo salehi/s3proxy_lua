@@ -175,10 +175,25 @@ http {
                 
                 local uri_args = ngx.req.get_uri_args()
                 
+                -- Read request body (needed for PUT/POST uploads)
+                ngx.req.read_body()
+                local req_body = ngx.req.get_body_data()
+                if not req_body then
+                    local body_file = ngx.req.get_body_file()
+                    if body_file then
+                        local f = io.open(body_file, "rb")
+                        if f then
+                            req_body = f:read("*a")
+                            f:close()
+                        end
+                    end
+                end
+
                 -- Validate and re-sign URL
                 local new_query_string, err = s3_proxy.validate_and_resign_url(
-                    ngx.var.request_uri, 
-                    uri_args
+                    ngx.var.request_uri,
+                    uri_args,
+                    ngx.req.get_method()
                 )
                 
                 if err then
@@ -224,9 +239,12 @@ http {
                     method = ngx.req.get_method(),
                     path = ngx.var.uri .. (new_query_string and ("?" .. new_query_string) or ""),
                     headers = {
-                        ["Host"] = origin_domain,
-                        ["User-Agent"] = "nginx-s3-proxy/1.0"
-                    }
+                        ["Host"]           = origin_domain,
+                        ["User-Agent"]     = "nginx-s3-proxy/1.0",
+                        ["Content-Type"]   = ngx.var.content_type,
+                        ["Content-Length"] = req_body and tostring(#req_body) or nil,
+                    },
+                    body = req_body,
                 })
                 
                 if not res then

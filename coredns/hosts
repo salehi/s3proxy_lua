@@ -9,3 +9,5 @@
 #
 # Changes take effect after restarting the coredns container:
 #   docker compose restart coredns
+185.143.234.235 s3.ir-thr-at1.arvanstorage.ir
+79.175.142.133 s3.afranet.net

@@ -229,8 +229,9 @@ function _M.verify_signature_v4(request_uri, query_params, headers, method)
 end
 
 -- Generate presigned URL V4
-local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucket, object_key, expires_in, region)
+local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucket, object_key, expires_in, region, method)
     region = region or ""
+    method = method or "GET"
     
     local host = string.match(endpoint, "://([^/]+)")
     
@@ -262,7 +263,8 @@ local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucke
     local signed_headers = "host"
     local payload_hash = "UNSIGNED-PAYLOAD"
     
-    local canonical_request = string.format("GET\n%s\n%s\n%s\n%s\n%s",
+    local canonical_request = string.format("%s\n%s\n%s\n%s\n%s\n%s",
+        method,
         canonical_uri, canonical_querystring, canonical_headers, 
         signed_headers, payload_hash)
     
@@ -295,7 +297,7 @@ local function generate_presigned_url_v2(endpoint, access_key, secret_key, bucke
 end
 
 -- Validate and re-sign URL
-function _M.validate_and_resign_url(request_uri, query_params)
+function _M.validate_and_resign_url(request_uri, query_params, method)
     local is_v4, is_v2 = detect_signature_version(query_params)
     
     if not is_v4 and not is_v2 then
@@ -332,7 +334,7 @@ function _M.validate_and_resign_url(request_uri, query_params)
         
         local expires_in = tonumber(get_param(query_params, "X-Amz-Expires")) or 3600
         new_url = generate_presigned_url_v4(endpoint, _M.ORIGIN_ACCESS_KEY,
-            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, _M.ORIGIN_REGION)
+            _M.ORIGIN_SECRET_KEY, bucket, object_key, expires_in, _M.ORIGIN_REGION, method)
     elseif is_v2 then
         local access_key_id = get_param(query_params, "AWSAccessKeyId")
         if access_key_id ~= _M.CLIENT_ACCESS_KEY then
