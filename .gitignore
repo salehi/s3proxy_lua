@@ -3,4 +3,4 @@ venv/
 .env
 k8s/
 test_methods.sh
-
+*.md
