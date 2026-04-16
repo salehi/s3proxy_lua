@@ -41,8 +41,12 @@ COPY nginx.conf.template /usr/local/openresty/nginx/conf/
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Build-time version argument
+ARG VERSION=dev
+
 # Environment variables with defaults
-ENV CLIENT_ACCESS_KEY=your_client_access_key_here \
+ENV VERSION=${VERSION} \
+    CLIENT_ACCESS_KEY=your_client_access_key_here \
     CLIENT_SECRET_KEY=your_client_secret_key_here \
     ORIGIN_ACCESS_KEY=your_origin_access_key_here \
     ORIGIN_SECRET_KEY=your_origin_secret_key_here \

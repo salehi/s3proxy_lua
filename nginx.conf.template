@@ -12,6 +12,7 @@ env ORIGIN_ACCESS_KEY;
 env ORIGIN_SECRET_KEY;
 env ORIGIN_DOMAIN;
 env ORIGIN_SCHEME;
+env VERSION;
 
 events {
     # Use epoll for Linux
@@ -240,7 +241,7 @@ http {
                     path = ngx.var.uri .. (new_query_string and ("?" .. new_query_string) or ""),
                     headers = {
                         ["Host"]           = origin_domain,
-                        ["User-Agent"]     = "nginx-s3-proxy/1.0",
+                        ["User-Agent"]     = "s4l3h1/s3proxy_lua " .. (os.getenv("VERSION") or "dev"),
                         ["Content-Type"]   = ngx.var.content_type,
                         ["Content-Length"] = req_body and tostring(#req_body) or nil,
                     },
