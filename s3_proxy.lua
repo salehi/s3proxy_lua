@@ -60,6 +60,17 @@ local function url_decode(str)
     return str
 end
 
+-- Format current UTC time without blocking the event loop.
+-- ngx.utctime() returns "YYYY/MM/DD HH:MM:SS" with no libc mutex.
+-- Returns datestamp ("YYYYMMDD") and timestamp ("YYYYMMDDTHHMMSSz").
+local function utc_format_now()
+    local s = ngx.utctime()
+    local date = string.sub(s, 1, 4) .. string.sub(s, 6, 7) .. string.sub(s, 9, 10)
+    local ts   = date .. "T"
+               .. string.sub(s, 12, 13) .. string.sub(s, 15, 16) .. string.sub(s, 18, 19) .. "Z"
+    return date, ts
+end
+
 -- Get first value from param (handles both string and table)
 local function get_param(params, key)
     local val = params[key]
@@ -279,9 +290,7 @@ local function generate_presigned_url_v4(endpoint, access_key, secret_key, bucke
     
     local host = string.match(endpoint, "://([^/]+)")
     
-    local now = ngx.time()
-    local datestamp = os.date("!%Y%m%d", now)
-    local timestamp = os.date("!%Y%m%dT%H%M%SZ", now)
+    local datestamp, timestamp = utc_format_now()
     
     local credential_scope = string.format("%s/%s/s3/aws4_request", datestamp, region)
     
@@ -511,9 +520,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
     end
 
     -- Re-sign with ORIGIN credentials using a fresh timestamp
-    local now            = ngx.time()
-    local new_date       = os.date("!%Y%m%d", now)
-    local new_ts         = os.date("!%Y%m%dT%H%M%SZ", now)
+    local new_date, new_ts = utc_format_now()
     local new_cred_scope = string.format("%s/%s/s3/aws4_request", new_date, region)
 
     -- Build ORIGIN headers map: copy original (lowercase) then override host + date
