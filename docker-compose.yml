@@ -1,11 +1,22 @@
 services:
+  coredns:
+    image: coredns/coredns:latest
+    volumes:
+      - ./coredns/Corefile:/etc/coredns/Corefile:ro
+      - ./coredns/hosts:/etc/coredns/hosts:ro
+    command: ["-conf", "/etc/coredns/Corefile"]
+    networks:
+      proxy-net:
+        ipv4_address: 172.20.0.53
+    restart: unless-stopped
+
   servera:
     image: s4l3h1/s3proxy_lua
     environment:
       # Client credentials (what clients use to sign requests)
       - CLIENT_ACCESS_KEY=${CLIENT_ACCESS_KEY}
       - CLIENT_SECRET_KEY=${CLIENT_SECRET_KEY}
-      
+
       # Server A origin credentials
       - ORIGIN_ACCESS_KEY=${SERVERA_ORIGIN_ACCESS_KEY}
       - ORIGIN_DOMAIN=${SERVERA_ORIGIN_DOMAIN}
@@ -13,16 +24,21 @@ services:
       - ORIGIN_PORT=${SERVERA_ORIGIN_PORT}
       - ORIGIN_SCHEME=${SERVERA_ORIGIN_SCHEME}
       - ORIGIN_SECRET_KEY=${SERVERA_ORIGIN_SECRET_KEY}
-      
-      
+
       # Proxy configuration
       - PORT=8080
+    dns:
+      - 172.20.0.53
+    networks:
+      - proxy-net
     restart: no
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 5s
       timeout: 3s
       retries: 3
+    depends_on:
+      - coredns
 
   serverb:
     image: s4l3h1/s3proxy_lua
@@ -30,7 +46,7 @@ services:
       # Client credentials (same as serverA)
       - CLIENT_ACCESS_KEY=${CLIENT_ACCESS_KEY}
       - CLIENT_SECRET_KEY=${CLIENT_SECRET_KEY}
-      
+
       # Server B origin credentials
       - ORIGIN_ACCESS_KEY=${SERVERB_ORIGIN_ACCESS_KEY}
       - ORIGIN_DOMAIN=${SERVERB_ORIGIN_DOMAIN}
@@ -38,16 +54,21 @@ services:
       - ORIGIN_PORT=${SERVERB_ORIGIN_PORT}
       - ORIGIN_SCHEME=${SERVERB_ORIGIN_SCHEME}
       - ORIGIN_SECRET_KEY=${SERVERB_ORIGIN_SECRET_KEY}
-      
+
       # Proxy configuration
       - PORT=8080
+    dns:
+      - 172.20.0.53
+    networks:
+      - proxy-net
     restart: no
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 5s
       timeout: 3s
       retries: 3
-    
+    depends_on:
+      - coredns
 
   haproxy:
     image: haproxy:2.9-alpine
@@ -56,10 +77,20 @@ services:
       - "1936:1936"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    dns:
+      - 172.20.0.53
+    networks:
+      - proxy-net
     restart: no
     depends_on:
       servera:
         condition: service_healthy
       serverb:
         condition: service_healthy
-    
+
+networks:
+  proxy-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

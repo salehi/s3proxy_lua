@@ -1,0 +1,11 @@
+# CoreDNS hosts file — add custom A records here.
+#
+# Format:
+#   <IP address>   <hostname> [<alias> ...]
+#
+# Examples:
+#   10.0.0.10   storage.internal
+#   10.0.0.20   backend.internal  backend
+#
+# Changes take effect after restarting the coredns container:
+#   docker compose restart coredns

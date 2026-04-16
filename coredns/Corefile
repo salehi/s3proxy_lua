@@ -1,0 +1,16 @@
+.:53 {
+    log
+    errors
+
+    # Custom A records — edit coredns/hosts to add entries.
+    # Format:  <IP>  <hostname>
+    # Example: 192.168.1.10  myservice.internal
+    hosts /etc/coredns/hosts {
+        fallthrough
+    }
+
+    # Forward all other queries to public DNS
+    forward . 1.1.1.1 8.8.8.8
+
+    cache 30
+}
