@@ -244,20 +244,32 @@ http {
                     req_headers["transfer-encoding"]    = nil
                     req_headers["keep-alive"]           = nil
                 else
-                    -- Presigned URL mode: validate and re-sign the query string.
-                    local new_qs, err = s3_proxy.validate_and_resign_url(
-                        ngx.var.request_uri, uri_args, method)
+                    local is_url_signed = uri_args["X-Amz-Signature"] ~= nil
+                        or (uri_args["Signature"] ~= nil and uri_args["AWSAccessKeyId"] ~= nil)
 
-                    if err then
-                        ngx.status = 400
-                        ngx.header.content_type = "application/json"
-                        ngx.say(string.format('{"error":"Proxy error: %s"}', err))
-                        return ngx.exit(400)
-                    end
+                    if is_url_signed then
+                        -- Presigned URL mode: validate and re-sign the query string.
+                        local new_qs, err = s3_proxy.validate_and_resign_url(
+                            ngx.var.request_uri, uri_args, method)
 
-                    upstream_path = ngx.var.uri
-                    if new_qs then
-                        upstream_path = upstream_path .. "?" .. new_qs
+                        if err then
+                            ngx.status = 400
+                            ngx.header.content_type = "application/json"
+                            ngx.say(string.format('{"error":"Proxy error: %s"}', err))
+                            return ngx.exit(400)
+                        end
+
+                        upstream_path = ngx.var.uri
+                        if new_qs then
+                            upstream_path = upstream_path .. "?" .. new_qs
+                        end
+                    else
+                        -- Unsigned request (public bucket): pass through as-is.
+                        upstream_path = ngx.var.uri
+                        local args = ngx.var.args
+                        if args and args ~= "" then
+                            upstream_path = upstream_path .. "?" .. args
+                        end
                     end
 
                     req_headers = {
