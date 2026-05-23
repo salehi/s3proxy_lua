@@ -19,10 +19,9 @@ services:
 
       # Server A origin credentials
       - ORIGIN_ACCESS_KEY=${SERVERA_ORIGIN_ACCESS_KEY}
-      - ORIGIN_DOMAIN=${SERVERA_ORIGIN_DOMAIN}
       - ORIGIN_HOST=${SERVERA_ORIGIN_HOST}
       - ORIGIN_HEALTH_PATH=${SERVERA_ORIGIN_HEALTH_PATH:-/}
-      - ORIGIN_PORT=${SERVERA_ORIGIN_PORT}
+      - ORIGIN_PORT=${SERVERA_ORIGIN_PORT:-443}
       - ORIGIN_REGION=${SERVERA_ORIGIN_REGION:-us-east-1}
       - ORIGIN_SCHEME=${SERVERA_ORIGIN_SCHEME}
       - ORIGIN_SECRET_KEY=${SERVERA_ORIGIN_SECRET_KEY}
@@ -51,10 +50,9 @@ services:
 
       # Server B origin credentials
       - ORIGIN_ACCESS_KEY=${SERVERB_ORIGIN_ACCESS_KEY}
-      - ORIGIN_DOMAIN=${SERVERB_ORIGIN_DOMAIN}
       - ORIGIN_HOST=${SERVERB_ORIGIN_HOST}
       - ORIGIN_HEALTH_PATH=${SERVERB_ORIGIN_HEALTH_PATH:-/}
-      - ORIGIN_PORT=${SERVERB_ORIGIN_PORT}
+      - ORIGIN_PORT=${SERVERB_ORIGIN_PORT:-443}
       - ORIGIN_REGION=${SERVERB_ORIGIN_REGION:-us-east-1}
       - ORIGIN_SCHEME=${SERVERB_ORIGIN_SCHEME}
       - ORIGIN_SECRET_KEY=${SERVERB_ORIGIN_SECRET_KEY}
@@ -77,7 +75,7 @@ services:
   haproxy:
     image: haproxy:3.3-alpine
     ports:
-      - "8080:8080"
+      - "8088:8080"
       - "1936:1936"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro

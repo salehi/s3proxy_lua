@@ -10,7 +10,8 @@ env CLIENT_ACCESS_KEY;
 env CLIENT_SECRET_KEY;
 env ORIGIN_ACCESS_KEY;
 env ORIGIN_SECRET_KEY;
-env ORIGIN_DOMAIN;
+env ORIGIN_HOST;
+env ORIGIN_PORT;
 env ORIGIN_SCHEME;
 env ORIGIN_HEALTH_PATH;
 env VERSION;
@@ -110,12 +111,11 @@ http {
                 local httpc = http.new()
                 httpc:set_timeout(5000)
                 
-                local origin_scheme = os.getenv("ORIGIN_SCHEME") or "https"
-                local origin_domain = os.getenv("ORIGIN_DOMAIN") or "${ORIGIN_HOST}"
+                local s3_proxy = require "s3_proxy"
                 local origin_health_path = os.getenv("ORIGIN_HEALTH_PATH") or "/"
 
                 local res, err = httpc:request_uri(
-                    string.format("%s://%s%s", origin_scheme, origin_domain, origin_health_path),
+                    string.format("%s://%s%s", s3_proxy.ORIGIN_SCHEME, s3_proxy.ORIGIN_AUTHORITY, origin_health_path),
                     {
                         method = "HEAD",
                         ssl_verify = false
@@ -196,10 +196,10 @@ http {
                 local s3_proxy = require "s3_proxy"
                 local http     = require "resty.http"
 
-                local uri_args      = ngx.req.get_uri_args()
-                local origin_scheme = s3_proxy.ORIGIN_SCHEME
-                local origin_domain = s3_proxy.ORIGIN_DOMAIN
-                local method        = ngx.req.get_method()
+                local uri_args         = ngx.req.get_uri_args()
+                local origin_scheme    = s3_proxy.ORIGIN_SCHEME
+                local origin_authority = s3_proxy.ORIGIN_AUTHORITY
+                local method           = ngx.req.get_method()
 
                 -- Read request body (needed for PUT/POST uploads).
                 -- In auth-header mode the body was already read in access phase;
@@ -235,7 +235,7 @@ http {
                     for k, v in pairs(orig_headers) do
                         req_headers[k] = v
                     end
-                    req_headers["host"]                 = origin_domain
+                    req_headers["host"]                 = origin_authority
                     req_headers["authorization"]        = ngx.ctx.new_auth_header
                     req_headers["x-amz-date"]           = ngx.ctx.new_amz_date
                     req_headers["x-amz-content-sha256"] = ngx.ctx.payload_hash
@@ -275,7 +275,7 @@ http {
                     end
 
                     req_headers = {
-                        ["Host"]           = origin_domain,
+                        ["Host"]           = origin_authority,
                         ["User-Agent"]     = "s4l3h1/s3proxy_lua " .. (os.getenv("VERSION") or "dev"),
                         ["Content-Type"]   = ngx.var.content_type,
                         ["Content-Length"] = req_body and tostring(#req_body) or nil,
@@ -289,10 +289,10 @@ http {
                 -- Connect with keepalive
                 local ok, err = httpc:connect({
                     scheme     = origin_scheme,
-                    host       = origin_domain,
-                    port       = origin_scheme == "https" and 443 or 80,
+                    host       = s3_proxy.ORIGIN_HOST,
+                    port       = s3_proxy.ORIGIN_PORT,
                     ssl_verify = false,
-                    pool       = origin_domain,
+                    pool       = origin_authority,
                     pool_size  = 256
                 })
 

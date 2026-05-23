@@ -50,7 +50,6 @@ ENV VERSION=${VERSION} \
     CLIENT_SECRET_KEY=your_client_secret_key_here \
     ORIGIN_ACCESS_KEY=your_origin_access_key_here \
     ORIGIN_SECRET_KEY=your_origin_secret_key_here \
-    ORIGIN_DOMAIN=s3.example.com \
     ORIGIN_SCHEME=https \
     ORIGIN_HOST=s3.example.com \
     ORIGIN_PORT=443 \

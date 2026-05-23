@@ -14,8 +14,18 @@ local ORIGIN_SECRET_KEY = os.getenv("ORIGIN_SECRET_KEY") or "your_origin_secret_
 local ORIGIN_REGION     = os.getenv("ORIGIN_REGION")     or "us-east-1"
 
 -- Non-secret config: exposed for callers (e.g. nginx.conf reads these)
-_M.ORIGIN_DOMAIN = os.getenv("ORIGIN_DOMAIN") or "s3.example.com"
-_M.ORIGIN_SCHEME = os.getenv("ORIGIN_SCHEME") or "https"
+_M.ORIGIN_HOST   = os.getenv("ORIGIN_HOST")            or "s3.example.com"
+_M.ORIGIN_PORT   = tonumber(os.getenv("ORIGIN_PORT"))  or 443
+_M.ORIGIN_SCHEME = os.getenv("ORIGIN_SCHEME")          or "https"
+
+-- Authority for the Host header and presigned-URL endpoint. Include the port
+-- only when it isn't the scheme default (443 https / 80 http), matching how S3
+-- clients canonicalise Host: standard endpoints sign as "host", while a MinIO
+-- on :9000 must sign as "host:9000".
+local _default_port = _M.ORIGIN_SCHEME == "https" and 443 or 80
+_M.ORIGIN_AUTHORITY = (_M.ORIGIN_PORT == _default_port)
+    and _M.ORIGIN_HOST
+    or string.format("%s:%d", _M.ORIGIN_HOST, _M.ORIGIN_PORT)
 
 -- URL encoding
 local function url_encode(str)
@@ -362,7 +372,7 @@ function _M.validate_and_resign_url(request_uri, query_params, method)
         return nil, path_err
     end
     
-    local endpoint = string.format("%s://%s", _M.ORIGIN_SCHEME, _M.ORIGIN_DOMAIN)
+    local endpoint = string.format("%s://%s", _M.ORIGIN_SCHEME, _M.ORIGIN_AUTHORITY)
     local new_url
     
     if is_v4 then
@@ -519,7 +529,7 @@ function _M.verify_and_resign_auth_header(method, path, query_params, headers, b
     for k, v in pairs(headers) do
         origin_hdrs[k:lower()] = v
     end
-    origin_hdrs["host"]      = _M.ORIGIN_DOMAIN
+    origin_hdrs["host"]      = _M.ORIGIN_AUTHORITY
     origin_hdrs["x-amz-date"] = new_ts
 
     local origin_canon_headers = build_canonical_headers(origin_hdrs)

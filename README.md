@@ -82,19 +82,17 @@ CLIENT_ACCESS_KEY=your_client_key
 CLIENT_SECRET_KEY=your_client_secret
 
 # Server A credentials
-SERVERB_ORIGIN_ACCESS_KEY=s3_servera_key
-SERVERB_ORIGIN_SECRET_KEY=s3_servera_secret
-SERVERB_ORIGIN_DOMAIN=s3_servera_domain
-SERVERB_ORIGIN_HOST=s3_servera_host
-SERVERB_ORIGIN_PORT="80"
-SERVERB_ORIGIN_SCHEME=http
+SERVERA_ORIGIN_ACCESS_KEY=s3_servera_key
+SERVERA_ORIGIN_SECRET_KEY=s3_servera_secret
+SERVERA_ORIGIN_HOST=s3_servera_host
+SERVERA_ORIGIN_PORT="80"
+SERVERA_ORIGIN_SCHEME=http
 # Origin health check path (default "/"; e.g. /minio/health/live for MinIO)
 SERVERB_ORIGIN_HEALTH_PATH=/
 
 # Server B credentials
 SERVERB_ORIGIN_ACCESS_KEY=s3_serverb_key
 SERVERB_ORIGIN_SECRET_KEY=s3_serverb_secret
-SERVERB_ORIGIN_DOMAIN=s3_serverb_domain
 SERVERB_ORIGIN_HOST=s3_serverb_host
 SERVERB_ORIGIN_PORT="80"
 SERVERB_ORIGIN_SCHEME=http
