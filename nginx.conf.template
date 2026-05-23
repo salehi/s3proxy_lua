@@ -12,6 +12,7 @@ env ORIGIN_ACCESS_KEY;
 env ORIGIN_SECRET_KEY;
 env ORIGIN_DOMAIN;
 env ORIGIN_SCHEME;
+env ORIGIN_HEALTH_PATH;
 env VERSION;
 
 events {
@@ -111,9 +112,10 @@ http {
                 
                 local origin_scheme = os.getenv("ORIGIN_SCHEME") or "https"
                 local origin_domain = os.getenv("ORIGIN_DOMAIN") or "${ORIGIN_HOST}"
-                
+                local origin_health_path = os.getenv("ORIGIN_HEALTH_PATH") or "/"
+
                 local res, err = httpc:request_uri(
-                    string.format("%s://%s/", origin_scheme, origin_domain),
+                    string.format("%s://%s%s", origin_scheme, origin_domain, origin_health_path),
                     {
                         method = "HEAD",
                         ssl_verify = false

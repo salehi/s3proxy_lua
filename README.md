@@ -88,6 +88,8 @@ SERVERB_ORIGIN_DOMAIN=s3_servera_domain
 SERVERB_ORIGIN_HOST=s3_servera_host
 SERVERB_ORIGIN_PORT="80"
 SERVERB_ORIGIN_SCHEME=http
+# Origin health check path (default "/"; e.g. /minio/health/live for MinIO)
+SERVERB_ORIGIN_HEALTH_PATH=/
 
 # Server B credentials
 SERVERB_ORIGIN_ACCESS_KEY=s3_serverb_key
@@ -96,6 +98,8 @@ SERVERB_ORIGIN_DOMAIN=s3_serverb_domain
 SERVERB_ORIGIN_HOST=s3_serverb_host
 SERVERB_ORIGIN_PORT="80"
 SERVERB_ORIGIN_SCHEME=http
+# Origin health check path (default "/"; e.g. /minio/health/live for MinIO)
+SERVERB_ORIGIN_HEALTH_PATH=/
 
 ```
 
